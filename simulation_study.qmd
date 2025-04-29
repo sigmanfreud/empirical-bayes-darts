@@ -1,0 +1,350 @@
+---
+title: "simulation_study"
+format: html
+editor: visual
+---
+
+# Simulation studies
+
+## Simulation
+
+For now, we focus on the case of **Bullseye**.
+
+Correctly specified prior.
+
+```{r}
+
+library(MASS)
+
+# Dartboard region classifier
+get_dartboard_region_vectorized <- function(x, y) {
+  segment_numbers <- c(20, 1, 18, 4, 13, 6, 10, 15, 2, 17,
+                       3, 19, 7, 16, 8, 11, 14, 9, 12, 5)
+  segment_width <- 360 / 20
+  
+  bull_inner <- 6.35
+  bull_outer <- 15.9
+  triple_inner <- 99
+  triple_outer <- 107
+  double_inner <- 162
+  double_outer <- 170
+
+  r <- sqrt(x^2 + y^2)
+  theta <- (90 - atan2(y, x) * 180 / pi) %% 360
+  segment_idx <- floor(theta / segment_width) + 1
+  segment <- segment_numbers[segment_idx]
+
+  region <- character(length(x))
+  region[r <= bull_inner] <- "Bull"
+  region[r > bull_inner & r <= bull_outer] <- "Outer Bull"
+  region[r > bull_outer & r <= triple_inner] <- paste0("S", segment[r > bull_outer & r <= triple_inner])
+  region[r > triple_inner & r <= triple_outer] <- paste0("T", segment[r > triple_inner & r <= triple_outer])
+  region[r > triple_outer & r <= double_inner] <- paste0("S", segment[r > triple_outer & r <= double_inner])
+  region[r > double_inner & r <= double_outer] <- paste0("D", segment[r > double_inner & r <= double_outer])
+  region[r > double_outer] <- "Miss"
+
+  return(region)
+}
+
+# Simulate data from prior G
+set.seed(123)
+n_players <- 5
+throws_per_player <- 10
+
+lognormal_mean <- 5    # set mean of log(sigma^2)
+lognormal_sd <- 0.5    # set sd of log(sigma^2)
+
+# Sample sigma_i^2 from LogNormal
+sigma2_i <- rlnorm(n_players, meanlog = lognormal_mean, sdlog = lognormal_sd)
+sigma_i <- sqrt(sigma2_i)  # Standard deviations
+
+# Simulate dart throws for each player
+player_data <- list()
+
+for (i in 1:n_players) {
+  samples <- MASS::mvrnorm(throws_per_player, mu = c(0, 0), Sigma = diag(sigma_i[i]^2, 2))
+  
+  # Debugging: Show (x, y) coordinates
+  cat(sprintf("Player %d (sigma = %.2f) coordinates:\n", i, sigma_i[i]))
+  print(samples)
+  
+  regions <- get_dartboard_region_vectorized(samples[,1], samples[,2])
+  player_data[[i]] <- list(samples = samples, regions = regions)
+  
+  # Region counts for player
+  cat(sprintf("Player %d region counts:\n", i))
+  print(table(regions))
+  cat("\n")
+}
+
+# Optional: Combine all players' regions
+all_regions <- unlist(lapply(player_data, function(p) p$regions))
+overall_counts <- table(all_regions)
+cat("Overall region counts:\n")
+print(overall_counts)
+
+```
+
+Then, we fit our EB model.
+
+```{r}
+library(stats4)
+#fit our EB
+
+#----convert this into Annuli data----
+
+convert_regions_to_annuli <- function(region_counts) {
+  annuli_counts <- rep(0, 6)  # Annuli 1 to 6
+  
+  for (region in names(region_counts)) {
+    count <- region_counts[[region]]
+    
+    if (region == "Bull") {
+      annuli_counts[1] <- annuli_counts[1] + count
+    } else if (region == "Outer Bull") {
+      annuli_counts[2] <- annuli_counts[2] + count
+    } else if (startsWith(region, "T")) {
+      annuli_counts[4] <- annuli_counts[4] + count
+    } else if (startsWith(region, "D")) {
+      annuli_counts[6] <- annuli_counts[6] + count
+    } else if (startsWith(region, "S")) {
+      # Single regions
+      annuli_counts[3] <- annuli_counts[3] + count
+    } else if (region == "Miss") {
+      # Optionally ignore or lump separately
+      next
+    }
+  }
+  
+  return(annuli_counts)
+}
+
+# Example usage
+# Assume overall_counts is your 'table' from the previous step
+annuli_counts <- convert_regions_to_annuli(overall_counts)
+names(annuli_counts) <- paste0("Annulus_", 1:6)
+print(annuli_counts)
+
+
+#----compute the MLE prior----
+
+# Radii for Bullseye annuli (mm)
+bull_radii <- c(0, 6.35, 15.9, 99, 107, 162, 170)
+
+# Exact annulus probability given a sigma^2
+dart_annulus_probability <- function(r1, r2, sigma2) {
+  pchisq(r2^2 / sigma2, df = 2) - pchisq(r1^2 / sigma2, df = 2)
+}
+
+# Log-likelihood function
+log_likelihood_bull_ab <- function(a, b, observed_counts, radii = bull_radii, n_theta_samples = 5000) {
+  if (a <= 0 || b <= 0) return(-Inf)
+
+  # Sample theta from inverse-chi-squared(a, b)
+  theta_samples <- b / rchisq(n_theta_samples, df = a)
+  logL_total <- 0
+
+  for (i in seq_along(observed_counts)) {
+    n_obs <- observed_counts[i]
+    if (n_obs == 0) next
+
+    probs <- dart_annulus_probability(radii[i], radii[i+1], theta_samples)
+    avg_prob <- mean(probs)
+    avg_prob <- max(avg_prob, 1e-12)  # Numerical stability
+
+    logL_total <- logL_total + n_obs * log(avg_prob)
+  }
+  
+  return(logL_total)
+}
+
+# MLE wrapper
+mle_bull_ab <- function(observed_counts, radii = bull_radii) {
+  neg_log_likelihood <- function(a, b) {
+    -log_likelihood_bull_ab(a, b, observed_counts, radii)
+  }
+  
+  mle_result <- mle(neg_log_likelihood, start = list(a = 5, b = 1000), method = "L-BFGS-B", lower = c(0.1, 0.1))
+  return(mle_result)
+}
+
+# --- Example usage ---
+
+# Suppose your annuli counts are like this (after conversion):
+observed_counts_bull <- annuli_counts
+
+# Estimate (a, b)
+set.seed(123)
+mle_result <- mle_bull_ab(observed_counts_bull)
+summary(mle_result)
+
+
+
+#----compute the likelihoods----
+# Exact annulus probability for given sigma^2
+dart_annulus_probability <- function(r1, r2, sigma2) {
+  pchisq(r2^2 / sigma2, df = 2) - pchisq(r1^2 / sigma2, df = 2)
+}
+
+# Function to compute LOG-likelihood first, then exp
+log_likelihood_bull_given_sigma <- function(sigma2, observed_counts, radii = bull_radii) {
+  log_likelihood <- 0
+  
+  for (i in seq_along(observed_counts)) {
+    n_obs <- observed_counts[i]
+    if (n_obs == 0) next
+
+    prob_annulus <- dart_annulus_probability(radii[i], radii[i+1], sigma2)
+    prob_annulus <- max(prob_annulus, 1e-12)  # Numerical stability to avoid log(0)
+
+    log_likelihood <- log_likelihood + n_obs * log(prob_annulus)
+  }
+  
+  return(log_likelihood)
+}
+
+# --- Example usage ---
+
+# Suppose your annuli counts
+observed_counts_bull <- c(2, 6, 2, 0, 0, 0)  # (n_1, ..., n_6)
+
+sigma_vals <- seq(2, 25, length.out = 100)
+sigma2_vals <- sigma_vals^2
+
+log_likelihood_vals <- sapply(sigma2_vals, function(s2) {
+  log_likelihood_bull_given_sigma(s2, observed_counts_bull)
+}, USE.NAMES = FALSE)
+
+likelihood_vals <- exp(log_likelihood_vals)
+likelihood_vals <- likelihood_vals / max(likelihood_vals)  # Optional normalization
+
+plot(sigma2_vals, likelihood_vals)
+
+#----multiply to get the posterior----
+mle_a <- coef(mle_result_bull)[["a"]]
+mle_b <- coef(mle_result_bull)[["b"]]
+prior <- dinvchisq(sigma2_vals, mle_a, mle_b)
+unnormalized_posterior <- likelihood_vals * prior
+normalized_posterior <- unnormalized_posterior / trapz(sigma2_vals, unnormalized_posterior)
+plot(sigma2_vals, normalized_posterior)
+
+
+
+#---calculate MAP ------
+idx_max <- which.max(normalized_posterior)
+sigma2_map <- sigma2_vals[idx_max]
+cat("Posterior mode (MAP estimate of sigma^2):", sigma2_map, "\n")
+
+```
+
+Next, we fit HW EB model.
+
+```{r}
+
+#fit HW
+
+
+#----generate psuedo counts------
+
+
+#1) find \hat\alpha
+
+
+#2) create psuedo-counts with the formula
+
+
+
+#------fit MLE sigma_hat--------
+
+
+
+```
+
+Finally, we compute risk across estimators.
+
+```{r}
+
+#calculate risk across estimators
+
+```
+
+## Heat-map generation
+
+-   Note: The heat-maps display win-probabilities as a function of where player B targets the first throw in his turn assuming both players play optimally thereafter.
+
+-   Maybe give some context for what it means for $\sigma = 300$ or something of that sort. Otherwise, it exists in a vacuum and is meaningless.
+
+-   
+
+Here is a sample heat map.
+
+```{r}
+
+library(MASS)
+library(ggplot2)
+library(ggforce)
+
+# Parameters
+mu <- c(0, 0)
+sigma <- 300
+n_samples <- 100000
+
+# Dartboard ring radii (mm)
+bullseye_inner <- 6.35
+bullseye_outer <- 15.9
+triple_inner <- 99
+triple_outer <- 107
+double_inner <- 162
+double_outer <- 170
+
+# Generate dart throws from bivariate normal
+samples <- MASS::mvrnorm(n_samples, mu = mu, Sigma = diag(sigma^2, 2))
+df <- data.frame(x = samples[,1], y = samples[,2])
+
+# Define dartboard rings
+rings <- data.frame(
+  x0 = 0,
+  y0 = 0,
+  r = c(bullseye_inner, bullseye_outer, triple_inner, triple_outer, double_inner, double_outer)
+)
+
+# Plot heatmap with rings overlay
+ggplot(df, aes(x = x, y = y)) +
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", color = NA) +
+  scale_fill_viridis_c() +
+  geom_circle(data = rings, aes(x0 = x0, y0 = y0, r = r), 
+              color = "white", linetype = "dashed", inherit.aes = FALSE) +
+  coord_fixed() +
+  labs(title = "Heatmap of Dart Landing Probabilities with Dartboard Rings",
+       x = "X-coordinate (mm)", y = "Y-coordinate (mm)", fill = "Density Level") +
+  theme_minimal()
+
+
+
+```
+
+Here is an attempt to generate a heatmap similar to Haugh and Wang.
+
+```{r}
+library(ggplot2)
+
+# Generate a grid of aim points (x, y) across the dartboard
+x_vals <- seq(-200, 200, length.out = 100)
+y_vals <- seq(-200, 200, length.out = 100)
+grid <- expand.grid(x = x_vals, y = y_vals)
+
+# Placeholder win probabilities (e.g., Gaussian bump around T20 at (0, 107))
+grid$probability <- exp(-((grid$x)^2 + (grid$y - 107)^2) / (2 * 50^2))
+
+# Plot heatmap
+ggplot(grid, aes(x = x, y = y, fill = probability)) +
+  geom_raster() +
+  scale_fill_gradient(low = "white", high = "red") +
+  coord_fixed() +
+  theme_minimal() +
+  labs(title = "Placeholder Win Probability Heatmap",
+       x = "X-coordinate (mm)",
+       y = "Y-coordinate (mm)",
+       fill = "Win Probability") +
+  theme(plot.title = element_text(hjust = 0.5))
+```

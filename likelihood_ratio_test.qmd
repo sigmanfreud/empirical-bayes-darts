@@ -1,0 +1,157 @@
+---
+title: "likelihood_ratio_test"
+format: html
+editor: visual
+---
+
+# Likelihood Ratio Test
+
+We would like to run a likelihood ratio test between the following two models:
+
+-   $X|\mu \sim N(\mu, \sigma I_2), \sigma \in \mathbb{R}$
+
+-   $X|\mu \sim N(\mu, \Sigma), \Sigma \in \mathbb{R}^{2\times 2}$
+
+## Estimate isotropic likelihood
+
+We already know how to do this. In fact, finding the MLE estimate is a convex problem.
+
+```{r}
+# Dartboard radii (in mm)
+radii <- c(0, 6.35, 15.9, 99, 107, 162, 170)
+
+# Observed counts for each annulus (example)
+counts <- c(9, 21, 0, 0, 0, 0)
+
+# Log-likelihood function (as previously written)
+log_likelihood <- function(sigma, counts, radii, tol = 1e-12) {
+  if (sigma <= 0) return(-Inf)
+  
+  scaled_radii_sq <- (radii^2) / sigma
+  F_values <- pchisq(scaled_radii_sq, df = 2)
+  probs <- diff(F_values)
+  probs[probs < tol] <- tol  # Apply tolerance to avoid log(0)
+  
+  return(sum(counts * log(probs)))
+}
+
+# Optimize to find the MLE of sigma
+mle_result <- optimize(
+  function(sigma) -log_likelihood(sigma, counts, radii),  # Negative log-likelihood
+  interval = c(1, 1000),  # Search interval for sigma
+  maximum = FALSE
+)
+
+# Output MLE
+cat("MLE of sigma:", mle_result$minimum, "\n")
+cat("Maximized log-likelihood:", -mle_result$objective, "\n")
+```
+
+## Estimate an-isotropic likelihood
+
+```{r}
+library(MASS)
+library(mvtnorm)
+
+# Dartboard region classifier (simplified)
+get_dartboard_region_vectorized <- function(x, y) {
+  bull_inner <- 6.35
+  bull_outer <- 15.9
+  triple_inner <- 99
+  triple_outer <- 107
+
+  r <- sqrt(x^2 + y^2)
+  region <- character(length(x))
+  region[r <= bull_inner] <- "Bull"
+  region[r > bull_inner & r <= bull_outer] <- "Outer Bull"
+  region[r > triple_inner & r <= triple_outer] <- "T20"
+  region[region == ""] <- "Miss"
+  return(region)
+}
+
+# Importance sampling within region (Bull, Outer Bull, T20)
+sample_region <- function(region, n) {
+  if (region == "Bull") {
+    r1 <- 0; r2 <- 6.35
+  } else if (region == "Outer Bull") {
+    r1 <- 6.35; r2 <- 15.9
+  } else if (region == "T20") {
+    r1 <- 99; r2 <- 107
+  } else {
+    stop("Unknown region")
+  }
+  theta <- runif(n, 0, 2 * pi)
+  radius <- sqrt(runif(n, r1^2, r2^2))
+  cbind(radius * cos(theta), radius * sin(theta))
+}
+
+# EM algorithm for Sigma estimation with log-likelihood tracking
+em_mle_sigma_regions <- function(observed_regions, n_samples = 5000, max_iter = 50, tol = 1e-4) {
+  Sigma <- diag(2)
+  trace_Sigma <- list(Sigma)
+  log_likelihood_trace <- numeric()
+  region_counts <- table(observed_regions)
+  regions_unique <- names(region_counts)
+
+  for (iter in 1:max_iter) {
+    S_sum <- matrix(0, 2, 2)
+    total_count <- sum(region_counts)
+    logL <- 0
+
+    for (region in regions_unique) {
+      n_obs <- region_counts[[region]]
+      if (n_obs == 0) next
+
+      samples <- sample_region(region, n_samples)
+      target_density <- dmvnorm(samples, mean = c(0,0), sigma = Sigma)
+      if (sum(target_density) == 0) next
+      weights <- target_density / sum(target_density)
+
+      cov_weighted <- t(samples) %*% (samples * weights)
+      S_sum <- S_sum + n_obs * cov_weighted
+
+      # Log-likelihood contribution
+      prob_region <- mean(target_density)
+      if (prob_region > 0) {
+        logL <- logL + n_obs * log(prob_region)
+      } else {
+        logL <- logL - Inf
+      }
+    }
+
+    Sigma_new <- S_sum / total_count
+    trace_Sigma[[iter + 1]] <- Sigma_new
+    log_likelihood_trace <- c(log_likelihood_trace, logL)
+
+    if (any(is.na(Sigma_new))) {
+      cat("Numerical instability at iteration", iter, "\n")
+      break
+    }
+    if (max(abs(Sigma_new - Sigma)) < tol) {
+      cat("Converged at iteration", iter, "\n")
+      break
+    }
+    Sigma <- Sigma_new
+  }
+
+  return(list(Sigma = Sigma, trace = trace_Sigma, log_likelihood = log_likelihood_trace))
+}
+
+# Simulate simple observed data
+set.seed(123)
+observed_regions <- sample(c("Bull", "Outer Bull"), size = 30, replace = TRUE, prob = c(0.3, 0.7))
+
+# Run EM algorithm
+em_result <- em_mle_sigma_regions(observed_regions)
+Sigma_estimate <- em_result$Sigma
+cat("Estimated Sigma:\n")
+print(Sigma_estimate)
+
+# Log-likelihood trace
+cat("Log-likelihood trace:\n")
+print(em_result$log_likelihood)
+
+
+
+
+```
