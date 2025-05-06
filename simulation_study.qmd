@@ -239,55 +239,23 @@ cat("Posterior mode (MAP estimate of sigma^2):", sigma2_map, "\n")
 
 Next, we fit HW EB model.
 
-```{r}
-
-#fit HW
-
-
-#----generate psuedo counts------
-
-
-#1) find \hat\alpha
-
-
-#2) create psuedo-counts with the formula
-
-
-
-#------fit MLE sigma_hat--------
-
-
-
-```
-
-Finally, we compute risk across estimators.
-
-```{r}
-
-#calculate risk across estimators
-
-```
+(See simulation_study_risk.qmd)
 
 ## Heat-map generation
 
--   Note: The heat-maps display win-probabilities as a function of where player B targets the first throw in his turn assuming both players play optimally thereafter.
-
--   Maybe give some context for what it means for $\sigma = 300$ or something of that sort. Otherwise, it exists in a vacuum and is meaningless.
-
--   
+-   Give some context for what it means for $\sigma = 300$ or something of that sort. Otherwise, it exists in a vacuum and is meaningless.
 
 Here is a sample heat map.
 
 ```{r}
 
-library(MASS)
 library(ggplot2)
 library(ggforce)
 
 # Parameters
 mu <- c(0, 0)
-sigma <- 300
-n_samples <- 100000
+sigma2 <- 3000  # variance, not sigma
+sigma <- sqrt(sigma2)
 
 # Dartboard ring radii (mm)
 bullseye_inner <- 6.35
@@ -297,54 +265,72 @@ triple_outer <- 107
 double_inner <- 162
 double_outer <- 170
 
-# Generate dart throws from bivariate normal
-samples <- MASS::mvrnorm(n_samples, mu = mu, Sigma = diag(sigma^2, 2))
-df <- data.frame(x = samples[,1], y = samples[,2])
+# Define grid
+grid_lim <- 200  # display range
+res <- 400       # resolution
+x_seq <- seq(-grid_lim, grid_lim, length.out = res)
+y_seq <- x_seq
+grid <- expand.grid(x = x_seq, y = y_seq)
 
-# Define dartboard rings
+# Compute radial distance and density
+grid$r <- sqrt(grid$x^2 + grid$y^2)
+grid$density <- (1 / (2 * pi * sigma2)) * exp(-grid$r^2 / (2 * sigma2))
+
+# Dartboard rings (for visual overlay)
 rings <- data.frame(
   x0 = 0,
   y0 = 0,
   r = c(bullseye_inner, bullseye_outer, triple_inner, triple_outer, double_inner, double_outer)
 )
 
-# Plot heatmap with rings overlay
-ggplot(df, aes(x = x, y = y)) +
-  stat_density_2d(aes(fill = ..level..), geom = "polygon", color = NA) +
-  scale_fill_viridis_c() +
-  geom_circle(data = rings, aes(x0 = x0, y0 = y0, r = r), 
+# Plot symmetric heatmap from closed-form
+ggplot(grid, aes(x = x, y = y)) +
+  geom_raster(aes(fill = density)) +
+  scale_fill_viridis_c(option = "plasma", trans = "sqrt") +
+  geom_circle(data = rings, aes(x0 = x0, y0 = y0, r = r),
               color = "white", linetype = "dashed", inherit.aes = FALSE) +
   coord_fixed() +
-  labs(title = "Heatmap of Dart Landing Probabilities with Dartboard Rings",
-       x = "X-coordinate (mm)", y = "Y-coordinate (mm)", fill = "Density Level") +
+  labs(title = expression("Heatmap of Bivariate Normal Density (N(0,"~sigma^2~"I))"),
+       x = "X-coordinate (mm)", y = "Y-coordinate (mm)", fill = "Density") +
   theme_minimal()
+
 
 
 
 ```
 
-Here is an attempt to generate a heatmap similar to Haugh and Wang.
+Now, we want to plot our choice of $\sigma^2$ against the likelihood of actually landing in Bullseye.
 
 ```{r}
-library(ggplot2)
+# Radius of the bullseye in mm
+r_bull <- 6.35
 
-# Generate a grid of aim points (x, y) across the dartboard
-x_vals <- seq(-200, 200, length.out = 100)
-y_vals <- seq(-200, 200, length.out = 100)
-grid <- expand.grid(x = x_vals, y = y_vals)
+# Grid of sigma² values
+sigma2_vals <- seq(0.01, 500, length.out = 300)
 
-# Placeholder win probabilities (e.g., Gaussian bump around T20 at (0, 107))
-grid$probability <- exp(-((grid$x)^2 + (grid$y - 107)^2) / (2 * 50^2))
+# Closed-form probability: P(||X||^2 <= r^2)
+bull_probs <- pchisq((r_bull^2) / sigma2_vals, df = 2)
 
-# Plot heatmap
-ggplot(grid, aes(x = x, y = y, fill = probability)) +
-  geom_raster() +
-  scale_fill_gradient(low = "white", high = "red") +
-  coord_fixed() +
-  theme_minimal() +
-  labs(title = "Placeholder Win Probability Heatmap",
-       x = "X-coordinate (mm)",
-       y = "Y-coordinate (mm)",
-       fill = "Win Probability") +
-  theme(plot.title = element_text(hjust = 0.5))
+# Plot
+plot(sigma2_vals, bull_probs, type = "l", lwd = 2,
+     xlab = expression(sigma^2), ylab = "Probability of Bullseye",
+     main = "P(Landing in Bullseye) vs. " ~ sigma^2)
+abline(h = 1, col = "gray", lty = 2)
+
+```
+
+### LogNormal Distribution stuff
+
+```{r}
+# Set seed for reproducibility (optional)
+set.seed(123)
+
+# Number of players (or samples)
+n_players <- 5
+
+# Sample sigma^2 from LogNormal(meanlog = 1, sdlog = 0.25)
+sigma2_true <- rlnorm(n_players, meanlog = 2, sdlog = 0.25)
+
+# Print the sampled values
+print(sigma2_true)
 ```

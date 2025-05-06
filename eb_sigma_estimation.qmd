@@ -12,8 +12,8 @@ First, we define the boundaries of the dartboard.
 
 ```{r}
 # Define the dartboard parameters (in mm)
-bullseye_inner_radius <- 12.7
-bullseye_outer_radius <- 31.8
+bullseye_inner_radius <- 6.35
+bullseye_outer_radius <- 15.9
 triple_ring_inner_radius <- 99
 triple_ring_outer_radius <- 107
 double_ring_inner_radius <- 162
@@ -71,7 +71,7 @@ Finally, we have an example as a sanity check.
 ```{r}
 library(MASS)
 
-estimate_probability_optimized <- function(mu, sigma, region, n_samples = 100000) {
+estimate_probability_optimized <- function(mu, sigma, region, n_samples = 10000) {
   samples <- MASS::mvrnorm(n_samples, mu = mu, Sigma = diag(sigma^2, 2))
   x <- samples[, 1]
   y <- samples[, 2]
@@ -81,12 +81,12 @@ estimate_probability_optimized <- function(mu, sigma, region, n_samples = 100000
 
 # Parameters
 mu <- c(0, 0)     # Aiming at center
-sigma <- 50       # Standard deviation
+sigma <- 18       # Standard deviation
 
 # Probabilities
 prob_bull <- estimate_probability_optimized(mu, sigma, "Bull")
-prob_triple_ring <- estimate_probability_pattern(mu, sigma, "^T")
-prob_double_ring <- estimate_probability_pattern(mu, sigma, "^D")
+prob_triple_ring <- estimate_probability_optimized(mu, sigma, "^T")
+prob_double_ring <- estimate_probability_optimized(mu, sigma, "^D")
 
 # Print results
 cat("Probability of landing in the bullseye:", prob_bull, "\n")
@@ -146,18 +146,15 @@ region_probs <- estimate_all_probabilities(mu, sigma, n_samples)
 total_prob <- sum(region_probs)
 cat("Total probability across all 62 regions:", total_prob, "\n")
 
-# Check if close to 1
-if (abs(total_prob - 1) < 0.01) {
-  cat("✅ Sum is close to 1 (within Monte Carlo tolerance).\n")
-} else {
-  cat("⚠️ Warning: Sum is not close to 1 — something might be wrong.\n")
-}
 
 ```
 
 ## Data generation
 
-We gotta do this part....
+```{r}
+
+
+```
 
 ## Prior Estimation
 
@@ -199,7 +196,7 @@ get_dartboard_region_vectorized <- function(x, y) {
 }
 
 # Monte Carlo estimate of p(Z | theta)
-estimate_region_probability <- function(mu, theta, target_region, n_samples = 50) {
+estimate_region_probability <- function(mu, theta, target_region, n_samples = 300) {
   sigma <- sqrt(theta)
   samples <- MASS::mvrnorm(n_samples, mu = mu, Sigma = diag(sigma^2, 2))
   regions <- get_dartboard_region_vectorized(samples[,1], samples[,2])
@@ -207,47 +204,124 @@ estimate_region_probability <- function(mu, theta, target_region, n_samples = 50
 }
 
 # Log-likelihood function for MLE over (a, b)
-log_likelihood_ab <- function(a, b, observed_regions, mu, target_region, n_theta_samples = 50, n_mc_samples = 50) {
+log_likelihood_ab <- function(a, b, observed_regions, mu,
+                              n_theta_samples = 300, n_mc_samples = 300) {
   if (a <= 0 || b <= 0) return(-Inf)
 
-  # Sample theta from inverse-chi-squared(a, b)
   theta_samples <- b / rchisq(n_theta_samples, df = a)
-  region_probs <- sapply(theta_samples, function(theta) {
-    estimate_region_probability(mu, theta, target_region, n_mc_samples)
-  })
-  region_probs <- pmax(region_probs, 1e-12)  # Avoid log(0)
 
-  # Approximate marginal likelihood
-  avg_prob <- mean(region_probs)
-  logL <- sum(log(rep(avg_prob, length(observed_regions))))
+  # Estimate P(Z = z | theta) for each theta and each unique region
+  region_labels <- unique(observed_regions)
+
+  region_prob_matrix <- sapply(theta_samples, function(theta) {
+    sigma <- sqrt(theta)
+    samples <- MASS::mvrnorm(n_mc_samples, mu = mu, Sigma = diag(sigma^2, 2))
+    regions <- get_dartboard_region_vectorized(samples[,1], samples[,2])
+
+    # Estimate P(Z = z | theta)
+    props <- table(factor(regions, levels = region_labels)) / n_mc_samples
+    as.numeric(props)
+  })
+
+  # region_prob_matrix is now: |region| x |theta_samples|
+  avg_probs <- rowMeans(region_prob_matrix)  # marginal P(Z = z) over theta
+
+  names(avg_probs) <- region_labels
+  avg_probs <- pmax(avg_probs, 1e-12)
+
+  # Count occurrences of each region in the data
+  obs_counts <- table(factor(observed_regions, levels = region_labels))
+
+  # Multinomial log-likelihood
+  logL <- sum(obs_counts * log(avg_probs))
 
   return(logL)
 }
 
-# Wrapper for stats4::mle
-mle_ab <- function(observed_regions, mu, target_region) {
-  neg_log_likelihood <- function(a, b) {
-    -log_likelihood_ab(a, b, observed_regions, mu, target_region)
-  }
 
-  mle_result <- mle(neg_log_likelihood, start = list(a = 5, b = 1000), method = "L-BFGS-B", lower = c(0.1, 0.1))
-  return(mle_result)
-}
 
 
 
 ```
 
-For now, I'm only doing 50 iterations. Should probably increase this amount. We show an example.
+For now, I'm only doing 300 iterations. Should probably increase this amount. We show an example.
 
 ```{r}
-# Example usage:
-set.seed(123)
-mu_T20 <- c(0, 107)
-observed_regions <- rep("T20", 15)  # Example data
+observed_regions <- c(
+  rep("D19", 57),
+  rep("Single (Outer) 19", 29),
+  rep("D7", 1),
+  rep("Miss", 67)
+)
 
-mle_result <- mle_ab(observed_regions, mu_T20, "T20")
-summary(mle_result)
+mu_D19 <- c(-51, -157)  
+
+
+```
+
+We compute the MLE by a grid-based search.
+
+```{r}
+# Grid of candidate (a, b) values
+a_vals <- seq(0.1, 1, length.out = 50)
+b_vals <- seq(0.1, 50, length.out = 50)
+
+# Initialize matrix to hold log-likelihoods
+loglik_grid <- matrix(NA, nrow = length(a_vals), ncol = length(b_vals))
+
+# Evaluate log-likelihood at each grid point
+for (i in seq_along(a_vals)) {
+  for (j in seq_along(b_vals)) {
+    loglik_grid[i, j] <- log_likelihood_ab(
+      a = a_vals[i],
+      b = b_vals[j],
+      observed_regions = observed_regions,
+      mu = mu_D19,
+      n_theta_samples = 100,
+      n_mc_samples = 100
+    )
+  }
+}
+
+# Find the best (a, b)
+best_idx <- which(loglik_grid == max(loglik_grid, na.rm = TRUE), arr.ind = TRUE)
+a_hat <- a_vals[best_idx[1]]
+b_hat <- b_vals[best_idx[2]]
+
+cat("MLE via grid search:\n")
+cat("a =", a_hat, "\n")
+cat("b =", b_hat, "\n")
+
+```
+
+Now, we plot this on a graph to see what it looks like.
+
+```{r}
+filled.contour(a_vals, b_vals, loglik_grid,
+               xlab = "a", ylab = "b",
+               main = "Log-Likelihood Surface")
+
+
+```
+
+Now, we would like to plot our prior estimate.
+
+```{r}
+dinvchisq <- function(x, df, scale) {
+  ifelse(x > 0,
+         (scale^df / gamma(df / 2)) * x^(-(df / 2 + 1)) * exp(-scale / (2 * x)) * (1 / (2^(df / 2))),
+         0)
+}
+
+theta_vals <- seq(0.1, 100, length.out = 500)  # Range of σ² values
+a <- 6
+b <- 30
+
+dens_vals <- dinvchisq(theta_vals, df = a, scale = b)
+
+plot(theta_vals, dens_vals, type = "l", lwd = 2,
+     main = expression(paste("Inverse-chi-squared(", a, ", ", b, ")")),
+     xlab = expression(sigma^2), ylab = "Density")
 ```
 
 ## Likelihood Estimation
@@ -284,13 +358,13 @@ likelihood_montecarlo <- function(mu, sigma, observed_counts, n_samples = 100000
 }
 
 # Define observed data
-observed_counts <- c("T20" = 15, "Single (Outer) 20" = 48, "Single (Outer) 1" = 3)
+observed_counts_ <- c("D19" = 3, "Single (Outer) 19" = 1, "Miss" = 3)
 
-# Approximate center of T20 (adjust as needed)
-mu_T20 <- c(0, 107)
+# Approximate center of D19 (adjust as needed)
+mu_D19 <- c(-51, -157) 
 
 # Evaluate likelihood over a range of sigma
-sigma_vals <- seq(10, 125, length.out = 100)  # Avoid sigma = 0 to prevent degenerate cases
+sigma_vals <- seq(1, 100, length.out = 100)  # Avoid sigma = 0 to prevent degenerate cases
 likelihood_vals <- sapply(sigma_vals, function(s) {
   likelihood_montecarlo(mu = mu_T20, sigma = s, observed_counts = observed_counts)
 })
@@ -310,8 +384,8 @@ Now, we plot.
 df <- data.frame(sigma = sigma_vals, likelihood = likelihood_vals)
 ggplot(df, aes(x = sigma, y = likelihood)) +
   geom_line(color = "darkgreen") +
-  labs(title = "Likelihood vs. Sigma (Aiming at T20)",
-       x = expression(sigma),
+  labs(title = "Likelihood vs. Sigma^2 (Aiming at D19) for Anderson G",
+       x = expression(sigma^2),
        y = "Normalized Likelihood") +
   theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5))
@@ -327,8 +401,7 @@ library(pracma)  # For trapz() to numerically integrate
 
 # Assume: sigma_vals, logL_vals, and likelihood_vals are already computed
 
-# Convert sigma^2 to theta (variance parameter)
-theta_vals <- sigma_vals^2
+theta_vals <- sigma_vals
 
 # Define Inverse Chi-Squared density (same as before)
 dinvchisq <- function(theta, a, b) {
@@ -339,7 +412,7 @@ dinvchisq <- function(theta, a, b) {
 
 
 # Evaluate prior at theta values
-prior_vals <- dinvchisq(theta_vals, 5, 1000)
+prior_vals <- dinvchisq(theta_vals, 2, 114.7)
 
 # Compute unnormalized posterior
 unnormalized_posterior <- likelihood_vals * prior_vals
@@ -349,7 +422,24 @@ posterior_vals <- unnormalized_posterior / trapz(theta_vals, unnormalized_poster
 
 # Plot posterior
 plot(theta_vals, posterior_vals, type = "l", lwd = 2, col = "purple",
-     main = "Posterior Distribution of Theta",
-     xlab = expression(theta), ylab = "Posterior Density")
+     main = "Posterior Distribution of Anderson G (D19)",
+     xlab = expression(theta = sigma^2), ylab = "Posterior Density")
 
+```
+
+```{r}
+# Radius of the bullseye in mm
+r_bull <- 6.35
+
+# Grid of sigma² values
+sigma2_vals <- seq(0.01, 500, length.out = 300)
+
+# Closed-form probability: P(||X||^2 <= r^2)
+bull_probs <- pchisq((r_bull^2) / sigma2_vals, df = 2)
+
+# Plot
+plot(sigma2_vals, bull_probs, type = "l", lwd = 2,
+     xlab = expression(sigma^2), ylab = "Probability of Bullseye",
+     main = "P(Landing in Bullseye) vs. " ~ sigma^2)
+abline(h = 1, col = "gray", lty = 2)
 ```

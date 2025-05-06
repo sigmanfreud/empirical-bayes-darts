@@ -70,23 +70,22 @@ Do this part later.
 ## Prior Generation
 
 ```{r}
+# Load libraries
 library(MASS)
 library(mvtnorm)
-library(stats4)
 
-# Bullseye annuli radii (explicit computation possible)
+# Bullseye annuli radii (as before)
 bull_radii <- c(0, 6.35, 15.9, 99, 107, 162, 170)
 
-# Function to compute exact probability for bullseye annuli
+# Function to compute exact annulus probabilities
 dart_annulus_probability <- function(r1, r2, sigma2) {
   pchisq(r2^2 / sigma2, df = 2) - pchisq(r1^2 / sigma2, df = 2)
 }
 
-# Log-likelihood function for Bullseye using exact annulus probabilities
+# Log-likelihood for bullseye using inverse-chi-squared prior
 log_likelihood_bull_ab <- function(a, b, observed_counts, radii = bull_radii, n_theta_samples = 5000) {
   if (a <= 0 || b <= 0) return(-Inf)
 
-  # Sample theta from inverse-chi-squared(a, b)
   theta_samples <- b / rchisq(n_theta_samples, df = a)
   logL_total <- 0
 
@@ -94,39 +93,66 @@ log_likelihood_bull_ab <- function(a, b, observed_counts, radii = bull_radii, n_
     n_obs <- observed_counts[i]
     if (n_obs == 0) next
 
-    probs <- dart_annulus_probability(radii[i], radii[i+1], theta_samples)
+    probs <- dart_annulus_probability(radii[i], radii[i + 1], theta_samples)
     avg_prob <- mean(probs)
     avg_prob <- max(avg_prob, 1e-12)
 
     logL_total <- logL_total + n_obs * log(avg_prob)
   }
+
   return(logL_total)
 }
 
-# Wrapper for stats4::mle for Bullseye
-mle_bull_ab <- function(observed_counts, radii = bull_radii) {
-  neg_log_likelihood <- function(a, b) {
-    -log_likelihood_bull_ab(a, b, observed_counts, radii)
+# === Grid search MLE version ===
+grid_search_bull_mle <- function(observed_counts,
+                                 a_vals = seq(0.1, 5, length.out = 20),
+                                 b_vals = seq(0.1, 50, length.out = 20),
+                                 radii = bull_radii,
+                                 n_theta_samples = 5000) {
+  loglik_grid <- matrix(NA, nrow = length(a_vals), ncol = length(b_vals))
+
+  for (i in seq_along(a_vals)) {
+    for (j in seq_along(b_vals)) {
+      loglik_grid[i, j] <- log_likelihood_bull_ab(
+        a = a_vals[i],
+        b = b_vals[j],
+        observed_counts = observed_counts,
+        radii = radii,
+        n_theta_samples = n_theta_samples
+      )
+    }
   }
 
-  mle_result <- mle(neg_log_likelihood, start = list(a = 5, b = 1000), method = "L-BFGS-B", lower = c(0.1, 0.1))
-  return(mle_result)
+  best_idx <- which(loglik_grid == max(loglik_grid, na.rm = TRUE), arr.ind = TRUE)
+  a_hat <- a_vals[best_idx[1]]
+  b_hat <- b_vals[best_idx[2]]
+
+  list(a = a_hat, b = b_hat, loglik = max(loglik_grid), loglik_grid = loglik_grid,
+       a_vals = a_vals, b_vals = b_vals)
 }
 
-# Example usage for Bullseye data:
-set.seed(123)
-observed_counts_bull <- c(14, 48, 3, 0, 0, 0)  # Example observed annulus counts
+```
 
-mle_result_bull <- mle_bull_ab(observed_counts_bull)
-summary(mle_result_bull)
+Next, we check it on an example.
+
+```{r}
+# Example observed annulus counts (Bullseye)
+observed_counts_bull <- c(241, 510, 152, 0, 0, 0)
+
+set.seed(123)
+result <- grid_search_bull_mle(observed_counts_bull)
+
+cat("Grid Search MLE:\n")
+cat("a =", result$a, "\n")
+cat("b =", result$b, "\n")
 ```
 
 Now, we generate some plots.
 
 ```{r}
 # Extract MLE estimates of a and b
-mle_a <- coef(mle_result_bull)[["a"]]
-mle_b <- coef(mle_result_bull)[["b"]]
+mle_a <- result$a
+mle_b <- result$b
 
 # Define Inverse Chi-Squared density
 dinvchisq <- function(theta, a, b) {
@@ -135,13 +161,13 @@ dinvchisq <- function(theta, a, b) {
 }
 
 # Create a range of theta values for plotting
-theta_vals <- seq(0.1, 1000, length.out = 500)
+theta_vals <- seq(0.1, 250, length.out = 500)
 density_vals <- dinvchisq(theta_vals, mle_a, mle_b)
 
 # Plot the prior density
 plot(theta_vals, density_vals, type = "l", lwd = 2, col = "blue",
      main = "Estimated Prior Distribution (Inverse Chi-Squared)",
-     xlab = expression(theta), ylab = "Density")
+     xlab = expression(theta = sigma^2), ylab = "Density")
 ```
 
 ## Likelihood Generation
@@ -149,10 +175,10 @@ plot(theta_vals, density_vals, type = "l", lwd = 2, col = "blue",
 In this case, the problem is quite tractable.
 
 ```{r}
-log_likelihood <- function(sigma, counts, radii, tol = 1e-12) {
+log_likelihood <- function(sigma2, counts, radii, tol = 1e-12) {
   if (sigma <= 0) return(-Inf)
   
-  scaled_radii_sq <- (radii^2) / sigma
+  scaled_radii_sq <- (radii^2) / sigma2
   F_values <- pchisq(scaled_radii_sq, df = 2)
   probs <- diff(F_values)
   
@@ -175,8 +201,8 @@ radii <- c(0,         # r_{D_0} = 0
            162,       # Double ring inner
            170)       # Double ring outer (r_{D_R})
 
-counts <- c(8,4,30,20,4,0)  # Example: counts for each annulus
-sigma_guess <- 1                       # Initial guess for sigma
+counts <- c(6,15,3,0,0,0)  # Example: counts for each annulus
+sigma_guess <- 10                       # Initial guess for sigma
 
 log_likelihood(sigma_guess, counts, radii)
 ```
@@ -185,18 +211,18 @@ log_likelihood(sigma_guess, counts, radii)
 library(ggplot2)
 
 
-sigma_vals <- seq(1, 5000, length.out = 500)
+sigma_vals <- seq(1, 250, length.out = 500)
 logL_vals <- sapply(sigma_vals, log_likelihood, counts = counts, radii = radii)
-likelihood_vals <- exp(logL_vals)  # Convert to likelihood
+likelihood_vals_b <- exp(logL_vals)  # Convert to likelihood
 
 # Create data frame for plotting
-df <- data.frame(sigma = sigma_vals, likelihood = likelihood_vals)
+df <- data.frame(sigma = sigma_vals, likelihood = likelihood_vals_b)
 
 # Plot likelihood
 ggplot(df, aes(x = sigma, y = likelihood)) +
   geom_line(color = "blue") +
-  labs(title = "Likelihood vs. Sigma",
-       x = expression(sigma),
+  labs(title = "Likelihood vs. Sigma (Anderson G)",
+       x = expression(sigma^2),
        y = "Likelihood") +
   theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5))
@@ -212,7 +238,7 @@ library(pracma)  # For trapz() to numerically integrate
 # Assume: sigma_vals, logL_vals, and likelihood_vals are already computed
 
 # Convert sigma^2 to theta (variance parameter)
-theta_vals <- sigma_vals^2
+theta_vals <- seq(1, 250, length.out = 500)
 
 # Define Inverse Chi-Squared density (same as before)
 dinvchisq <- function(theta, a, b) {
@@ -221,20 +247,20 @@ dinvchisq <- function(theta, a, b) {
 }
 
 # Example: Use MLE estimates for prior
-mle_a <- coef(mle_result_bull)[["a"]]
-mle_b <- coef(mle_result_bull)[["b"]]
+mle_a <- result$a
+mle_b <- result$b
 
 # Evaluate prior at theta values
 prior_vals <- dinvchisq(theta_vals, mle_a, mle_b)
 
 # Compute unnormalized posterior
-unnormalized_posterior <- likelihood_vals * prior_vals
+unnormalized_posterior <- likelihood_vals_b * prior_vals
 
 # Normalize posterior
 posterior_vals <- unnormalized_posterior / trapz(theta_vals, unnormalized_posterior)
 
 # Plot posterior
 plot(theta_vals, posterior_vals, type = "l", lwd = 2, col = "purple",
-     main = "Posterior Distribution of Theta",
-     xlab = expression(theta), ylab = "Posterior Density")
+     main = "Posterior Distribution of Anderson G",
+     xlab = expression(theta = sigma^2), ylab = "Posterior Density")
 ```

@@ -143,38 +143,32 @@ estimate_sigmas <- function(player_count_list) {
     neg_log_likelihood <- function(a, b) {
       -log_likelihood_bull_ab(a, b, observed_counts, radii)
     }
-    mle_result <- mle(neg_log_likelihood, start = list(a = 5, b = 1000), method = "L-BFGS-B", lower = c(0.1, 0.1))
+    mle_result <- mle(neg_log_likelihood, start = list(a = 5, b = 50), method = "L-BFGS-B", lower = c(0.1, 0.1))
     return(mle_result)
   }
 
-  set.seed(123)
   mle_result <- mle_bull_ab(overall_annuli)
   mle_a <- coef(mle_result)["a"]
   mle_b <- coef(mle_result)["b"]
 
-  # Step 2: For each player, compute MAP estimate
+  # Step 2: Continuous optimization of posterior mode per player
+  estimate_posterior_sigma2_map <- function(observed_counts_bull, a, b, radii) {
+    neg_log_posterior <- function(s2) {
+      if (s2 <= 0) return(Inf)
+      loglik <- log_likelihood_bull_given_sigma(s2, observed_counts_bull, radii)
+      logprior <- log(dinvchisq(s2, a, b) + 1e-12)
+      -(loglik + logprior)
+    }
+
+    opt_result <- optimize(neg_log_posterior, interval = c(1e-3, 100), tol = 1e-6)
+    return(opt_result$minimum)
+  }
+
   sigma2_map_list <- c()
 
   for (player_counts in player_count_list) {
     observed_counts_bull <- convert_regions_to_annuli(player_counts)
-
-    sigma_vals <- seq(2, 25, length.out = 100)
-    sigma2_vals <- sigma_vals^2
-
-    log_likelihood_vals <- sapply(sigma2_vals, function(s2) {
-      log_likelihood_bull_given_sigma(s2, observed_counts_bull, bull_radii)
-    }, USE.NAMES = FALSE)
-
-    likelihood_vals <- exp(log_likelihood_vals)
-    prior_vals <- sapply(sigma2_vals, function(theta) {
-      dinvchisq(theta, mle_a, mle_b)
-    })
-
-    unnormalized_posterior <- likelihood_vals * prior_vals
-    normalized_posterior <- unnormalized_posterior / trapz(sigma2_vals, unnormalized_posterior)
-
-    idx_max <- which.max(normalized_posterior)
-    sigma2_map <- sigma2_vals[idx_max]
+    sigma2_map <- estimate_posterior_sigma2_map(observed_counts_bull, mle_a, mle_b, bull_radii)
     sigma2_map_list <- c(sigma2_map_list, sigma2_map)
   }
 
@@ -182,7 +176,7 @@ estimate_sigmas <- function(player_count_list) {
 }
 
 # Simulation function to estimate risk
-simulate_estimation_risk <- function(n_trials = 100, n_players = 5, throws_per_player = 15, a = 5, b = 934) {
+simulate_estimation_risk <- function(n_trials = 100, n_players = 5, throws_per_player = 15, a = 5, b = 50) {
   risk_values <- c()
 
   for (trial in 1:n_trials) {
@@ -198,7 +192,13 @@ simulate_estimation_risk <- function(n_trials = 100, n_players = 5, throws_per_p
     }
 
     sigma2_est <- estimate_sigmas(player_counts)
+    cat('Trial ', trial, '| sigma2_est: ', sigma2_est)
+    cat("\n")
+    cat('Trial ', trial, '| sigma2_true: ', sigma2_true)
+    cat("\n")
     risk <- mean((sigma2_est - sigma2_true)^2)
+    cat('Trial', trial, '| risk: ',  risk)
+    cat("\n")
     risk_values <- c(risk_values, risk)
   }
 
@@ -346,8 +346,8 @@ estimate_sigmas_lognormal_prior <- function(player_count_list) {
   bull_radii <- c(0, 6.35, 15.9, 99, 107, 162, 170)
 
   # Assume fixed LogNormal prior: meanlog = 5, sdlog = 0.5
-  prior_meanlog <- 5
-  prior_sdlog <- 0.5
+  prior_meanlog <- 1
+  prior_sdlog <- 0.25
 
   sigma2_map_list <- c()
 
@@ -380,7 +380,7 @@ simulate_estimation_risk_misspecified <- function(n_trials = 100, n_players = 5,
   risk_values <- c()
 
   for (trial in 1:n_trials) {
-    sigma2_true <- rlnorm(n_players, meanlog = 5, sdlog = 0.5)
+    sigma2_true <- rlnorm(n_players, meanlog = 3, sdlog = 0.5)
     player_counts <- list()
 
     for (i in 1:n_players) {
@@ -390,13 +390,22 @@ simulate_estimation_risk_misspecified <- function(n_trials = 100, n_players = 5,
       player_counts[[i]] <- expand_region_table(table(regions))
     }
 
-    sigma2_est <- estimate_sigmas_lognormal_prior(player_counts)
+    sigma2_est <- estimate_sigmas(player_counts)
+    cat('Trial ', trial, '| sigma2_est: ', sigma2_est)
+    cat("\n")
+    cat('Trial ', trial, '| sigma2_true: ', sigma2_true)
+    cat("\n")
     risk <- mean((sigma2_est - sigma2_true)^2)
+    cat('Trial', trial, '| risk: ',  risk)
+    cat("\n")
     risk_values <- c(risk_values, risk)
+    
   }
 
   return(risk_values)
 }
+
+
 ```
 
 Now, we test it.
@@ -526,12 +535,11 @@ estimate_sigma_pseudo <- function(player_annuli_list) {
 }
 
 # Example Simulation Data
-set.seed(123)
 n_players <- 5
 throws_per_player <- 15
 
 # True sigma2 from LogNormal prior
-sigma2_true <- rlnorm(n_players, meanlog = 5, sdlog = 0.5)
+sigma2_true <- rlnorm(n_players, meanlog = 3, sdlog = 0.5)
 sigma_true <- sqrt(sigma2_true)
 
 # Simulate dart throws
@@ -598,7 +606,7 @@ simulate_risk_pseudocount_invchisq <- function(n_trials = 100, n_players = 5, th
   for (trial in 1:n_trials) {
     # Step 1: Simulate true sigma^2 from Inverse-Chi-Squared(5, 934)
     a <- 5
-    b <- 934
+    b <- 50
     sigma2_true <- b / rchisq(n_players, df = a)
     sigma_true <- sqrt(sigma2_true)
 
@@ -628,7 +636,6 @@ simulate_risk_pseudocount_invchisq <- function(n_trials = 100, n_players = 5, th
 
 ```{r}
 # --- Run the simulation ---
-set.seed(42)
 risk_vals_pseudocount <- simulate_risk_pseudocount_invchisq(n_trials = 100)
 
 # Plot
@@ -652,7 +659,7 @@ simulate_risk_pseudocount_lognormal <- function(n_trials = 100, n_players = 5, t
 
   for (trial in 1:n_trials) {
     # Step 1: Simulate true sigma^2 from LogNormal(meanlog = 5, sdlog = 0.5)
-    meanlog <- 5
+    meanlog <- 3
     sdlog <- 0.5
     sigma2_true <- rlnorm(n_players, meanlog = meanlog, sdlog = sdlog)
     sigma_true <- sqrt(sigma2_true)
@@ -694,5 +701,378 @@ hist(risk_vals_pseudocount_lognormal, col = "red", breaks = 60,
 lines(density(risk_vals_pseudocount_lognormal), col = "blue", lwd = 2)
 abline(v = mean(risk_vals_pseudocount_lognormal), col = "black", lty = 2, lwd = 2)
 legend("topright", legend = sprintf("Mean Risk = %.2f", mean(risk_vals_pseudocount_lognormal)),
+       col = "black", lty = 2, bty = "n")
+```
+
+### Oracle Estimator
+
+In the first case.
+
+```{r}
+library(MASS)
+library(stats4)
+library(pracma)  # for trapz()
+
+# Dartboard region classifier
+get_dartboard_region_vectorized <- function(x, y) {
+  segment_numbers <- c(20, 1, 18, 4, 13, 6, 10, 15, 2, 17,
+                       3, 19, 7, 16, 8, 11, 14, 9, 12, 5)
+  segment_width <- 360 / 20
+
+  bull_inner <- 6.35
+  bull_outer <- 15.9
+  triple_inner <- 99
+  triple_outer <- 107
+  double_inner <- 162
+  double_outer <- 170
+
+  r <- sqrt(x^2 + y^2)
+  theta <- (90 - atan2(y, x) * 180 / pi) %% 360
+  segment_idx <- floor(theta / segment_width) + 1
+  segment <- segment_numbers[segment_idx]
+
+  region <- character(length(x))
+  region[r <= bull_inner] <- "Bull"
+  region[r > bull_inner & r <= bull_outer] <- "Outer Bull"
+  region[r > bull_outer & r <= triple_inner] <- paste0("S", segment[r > bull_outer & r <= triple_inner])
+  region[r > triple_inner & r <= triple_outer] <- paste0("T", segment[r > triple_inner & r <= triple_outer])
+  region[r > triple_outer & r <= double_inner] <- paste0("S", segment[r > triple_outer & r <= double_inner])
+  region[r > double_inner & r <= double_outer] <- paste0("D", segment[r > double_inner & r <= double_outer])
+  region[r > double_outer] <- "Miss"
+
+  return(region)
+}
+
+# Expand region table to include all possible regions
+expand_region_table <- function(region_table) {
+  all_regions <- c(
+    "Bull", "Outer Bull",
+    paste0("S", 1:20),
+    paste0("T", 1:20),
+    paste0("D", 1:20),
+    "Miss"
+  )
+  full_table <- setNames(rep(0, length(all_regions)), all_regions)
+  matching_regions <- intersect(names(region_table), names(full_table))
+  full_table[matching_regions] <- region_table[matching_regions]
+  return(full_table)
+}
+
+# Convert region counts into annuli counts
+convert_regions_to_annuli <- function(region_counts) {
+  annuli_counts <- rep(0, 6)
+
+  for (region in names(region_counts)) {
+    count <- region_counts[[region]]
+
+    if (region == "Bull") {
+      annuli_counts[1] <- annuli_counts[1] + count
+    } else if (region == "Outer Bull") {
+      annuli_counts[2] <- annuli_counts[2] + count
+    } else if (startsWith(region, "T")) {
+      annuli_counts[4] <- annuli_counts[4] + count
+    } else if (startsWith(region, "D")) {
+      annuli_counts[6] <- annuli_counts[6] + count
+    } else if (startsWith(region, "S")) {
+      annuli_counts[3] <- annuli_counts[3] + count
+    }
+  }
+  return(annuli_counts)
+}
+
+# Inverse-Chi-Squared density
+dinvchisq <- function(theta, a, b) {
+  if (theta <= 0) return(0)
+  (b/2)^(a/2) / gamma(a/2) * theta^(-a/2 - 1) * exp(-b / (2*theta))
+}
+
+# Exact annulus probability
+dart_annulus_probability <- function(r1, r2, sigma2) {
+  pchisq(r2^2 / sigma2, df = 2) - pchisq(r1^2 / sigma2, df = 2)
+}
+
+# Log-likelihood for a fixed sigma^2
+log_likelihood_bull_given_sigma <- function(sigma2, observed_counts, radii = c(0, 6.35, 15.9, 99, 107, 162, 170)) {
+  log_likelihood <- 0
+
+  for (i in seq_along(observed_counts)) {
+    n_obs <- observed_counts[i]
+    if (n_obs == 0) next
+
+    prob_annulus <- dart_annulus_probability(radii[i], radii[i+1], sigma2)
+    prob_annulus <- max(prob_annulus, 1e-12)
+
+    log_likelihood <- log_likelihood + n_obs * log(prob_annulus)
+  }
+
+  return(log_likelihood)
+}
+
+# Log-likelihood for a given (a,b)
+log_likelihood_bull_ab <- function(a, b, observed_counts, radii, n_theta_samples = 5000) {
+  if (a <= 0 || b <= 0) return(-Inf)
+  theta_samples <- b / rchisq(n_theta_samples, df = a)
+  logL_total <- 0
+
+  for (i in seq_along(observed_counts)) {
+    n_obs <- observed_counts[i]
+    if (n_obs == 0) next
+
+    probs <- dart_annulus_probability(radii[i], radii[i+1], theta_samples)
+    avg_prob <- mean(probs)
+    avg_prob <- max(avg_prob, 1e-12)
+
+    logL_total <- logL_total + n_obs * log(avg_prob)
+  }
+  return(logL_total)
+}
+
+# Wrapper to perform entire EB estimation
+estimate_sigmas <- function(player_count_list) {
+  bull_radii <- c(0, 6.35, 15.9, 99, 107, 162, 170)
+
+  # Overall counts
+  overall_counts <- Reduce("+", player_count_list)
+  overall_annuli <- convert_regions_to_annuli(overall_counts)
+
+
+  mle_a <- 5
+  mle_b <- 50
+
+  # Step 2: Continuous optimization of posterior mode per player
+  estimate_posterior_sigma2_map <- function(observed_counts_bull, a, b, radii) {
+    neg_log_posterior <- function(s2) {
+      if (s2 <= 0) return(Inf)
+      loglik <- log_likelihood_bull_given_sigma(s2, observed_counts_bull, radii)
+      logprior <- log(dinvchisq(s2, a, b) + 1e-12)
+      -(loglik + logprior)
+    }
+
+    opt_result <- optimize(neg_log_posterior, interval = c(1e-3, 100), tol = 1e-6)
+    return(opt_result$minimum)
+  }
+
+  sigma2_map_list <- c()
+
+  for (player_counts in player_count_list) {
+    observed_counts_bull <- convert_regions_to_annuli(player_counts)
+    sigma2_map <- estimate_posterior_sigma2_map(observed_counts_bull, mle_a, mle_b, bull_radii)
+    sigma2_map_list <- c(sigma2_map_list, sigma2_map)
+  }
+
+  return(sigma2_map_list)
+}
+
+# Simulation function to estimate risk
+simulate_estimation_risk <- function(n_trials = 100, n_players = 5, throws_per_player = 15, a = 5, b = 50) {
+  risk_values <- c()
+
+  for (trial in 1:n_trials) {
+    sigma2_true <- b / rchisq(n_players, df = a)
+    player_counts <- list()
+
+    for (i in 1:n_players) {
+      sigma <- sqrt(sigma2_true[i])
+      sigma <- max(sigma, 0.5)
+      samples <- mvrnorm(n = throws_per_player, mu = c(0, 0), Sigma = diag(sigma^2, 2))
+      regions <- get_dartboard_region_vectorized(samples[,1], samples[,2])
+      player_counts[[i]] <- expand_region_table(table(regions))
+    }
+
+    sigma2_est <- estimate_sigmas(player_counts)
+    cat('Trial ', trial, '| sigma2_est: ', sigma2_est)
+    cat("\n")
+    cat('Trial ', trial, '| sigma2_true: ', sigma2_true)
+    cat("\n")
+    risk <- mean((sigma2_est - sigma2_true)^2)
+    cat('Trial', trial, '| risk: ',  risk)
+    cat("\n")
+    risk_values <- c(risk_values, risk)
+  }
+
+  return(risk_values)
+}
+
+
+
+
+
+```
+
+```{r}
+risk_vals <- simulate_estimation_risk(n_trials = 100)
+hist(risk_vals)
+mean(risk_vals)
+```
+
+```{r}
+# Remove extreme outliers
+threshold <- quantile(risk_vals, 0.99)  # 99th percentile cutoff
+filtered_risk_vals <- risk_vals[risk_vals <= threshold]
+
+# Plot histogram
+hist(filtered_risk_vals, 
+     breaks = 60,    # Smaller bins
+     col = "red",    # Red bars
+     border = "white",
+     probability = TRUE,
+     main = "Distribution of Risk",
+     xlab = "Risk (MSE)")
+
+# Add density curve
+lines(density(filtered_risk_vals), col = "darkblue", lwd = 2)
+
+# Add mean line
+abline(v = mean(filtered_risk_vals), col = "black", lty = 2, lwd = 2)
+
+# Add legend
+legend("topright", 
+       legend = sprintf("Mean Risk = %.2f", mean(filtered_risk_vals)),
+       col = "black", lty = 2, bty = "n")
+```
+
+Now, we do it in the second case.
+
+```{r}
+library(MASS)
+library(pracma)
+
+# Dartboard region classifier
+get_dartboard_region_vectorized <- function(x, y) {
+  segment_numbers <- c(20, 1, 18, 4, 13, 6, 10, 15, 2, 17,
+                       3, 19, 7, 16, 8, 11, 14, 9, 12, 5)
+  segment_width <- 360 / 20
+  bull_inner <- 6.35; bull_outer <- 15.9
+  triple_inner <- 99; triple_outer <- 107
+  double_inner <- 162; double_outer <- 170
+
+  r <- sqrt(x^2 + y^2)
+  theta <- (90 - atan2(y, x) * 180 / pi) %% 360
+  segment_idx <- floor(theta / segment_width) + 1
+  segment <- segment_numbers[segment_idx]
+
+  region <- character(length(x))
+  region[r <= bull_inner] <- "Bull"
+  region[r > bull_inner & r <= bull_outer] <- "Outer Bull"
+  region[r > bull_outer & r <= triple_inner] <- paste0("S", segment[r > bull_outer & r <= triple_inner])
+  region[r > triple_inner & r <= triple_outer] <- paste0("T", segment[r > triple_inner & r <= triple_outer])
+  region[r > triple_outer & r <= double_inner] <- paste0("S", segment[r > triple_outer & r <= double_inner])
+  region[r > double_inner & r <= double_outer] <- paste0("D", segment[r > double_inner & r <= double_outer])
+  region[r > double_outer] <- "Miss"
+  return(region)
+}
+
+# Expand region table to include all regions
+expand_region_table <- function(region_table) {
+  all_regions <- c("Bull", "Outer Bull", paste0("S", 1:20),
+                   paste0("T", 1:20), paste0("D", 1:20), "Miss")
+  full_table <- setNames(rep(0, length(all_regions)), all_regions)
+  matching <- intersect(names(region_table), names(full_table))
+  full_table[matching] <- region_table[matching]
+  return(full_table)
+}
+
+convert_regions_to_annuli <- function(region_counts) {
+  annuli_counts <- rep(0, 6)
+  for (region in names(region_counts)) {
+    count <- region_counts[[region]]
+    if (region == "Bull") annuli_counts[1] <- annuli_counts[1] + count
+    else if (region == "Outer Bull") annuli_counts[2] <- annuli_counts[2] + count
+    else if (startsWith(region, "T")) annuli_counts[4] <- annuli_counts[4] + count
+    else if (startsWith(region, "D")) annuli_counts[6] <- annuli_counts[6] + count
+    else if (startsWith(region, "S")) annuli_counts[3] <- annuli_counts[3] + count
+  }
+  return(annuli_counts)
+}
+
+dart_annulus_probability <- function(r1, r2, sigma2) {
+  pchisq(r2^2 / sigma2, df = 2) - pchisq(r1^2 / sigma2, df = 2)
+}
+
+log_likelihood_bull_given_sigma <- function(sigma2, counts, radii = c(0, 6.35, 15.9, 99, 107, 162, 170)) {
+  logL <- 0
+  for (i in seq_along(counts)) {
+    n <- counts[i]
+    if (n == 0) next
+    p <- dart_annulus_probability(radii[i], radii[i+1], sigma2)
+    p <- max(p, 1e-12)
+    logL <- logL + n * log(p)
+  }
+  return(logL)
+}
+
+# Oracle EB with LogNormal(3, 0.5) prior
+estimate_sigmas_oracle_lognormal <- function(player_count_list) {
+  prior_meanlog <- 3
+  prior_sdlog <- 0.5
+  bull_radii <- c(0, 6.35, 15.9, 99, 107, 162, 170)
+  sigma_vals <- seq(1, 50, length.out = 200)
+  sigma2_vals <- sigma_vals^2
+  sigma2_map_list <- c()
+
+  for (player_counts in player_count_list) {
+    counts <- convert_regions_to_annuli(player_counts)
+    logL_vals <- sapply(sigma2_vals, log_likelihood_bull_given_sigma, counts, bull_radii)
+    L_vals <- exp(logL_vals)
+    prior_vals <- dlnorm(sigma2_vals, meanlog = prior_meanlog, sdlog = prior_sdlog)
+    posterior <- L_vals * prior_vals
+    posterior <- posterior / trapz(sigma2_vals, posterior)
+    sigma2_map <- sigma2_vals[which.max(posterior)]
+    sigma2_map_list <- c(sigma2_map_list, sigma2_map)
+  }
+
+  return(sigma2_map_list)
+}
+
+# Oracle simulation function
+simulate_oracle_risk_lognormal <- function(n_trials = 100, n_players = 5, throws_per_player = 15) {
+  risk_values <- c()
+  for (trial in 1:n_trials) {
+    sigma2_true <- rlnorm(n_players, meanlog = 3, sdlog = 0.5)
+    player_counts <- list()
+    for (i in 1:n_players) {
+      sigma <- sqrt(sigma2_true[i])
+      samples <- mvrnorm(n = throws_per_player, mu = c(0, 0), Sigma = diag(sigma^2, 2))
+      regions <- get_dartboard_region_vectorized(samples[,1], samples[,2])
+      player_counts[[i]] <- expand_region_table(table(regions))
+    }
+    sigma2_est <- estimate_sigmas_oracle_lognormal(player_counts)
+    cat(sprintf("Trial %d | risk: %.4f\n", trial, mean((sigma2_est - sigma2_true)^2)))
+    risk_values <- c(risk_values, mean((sigma2_est - sigma2_true)^2))
+  }
+  return(risk_values)
+}
+
+```
+
+```{r}
+risk_vals <- simulate_oracle_risk_lognormal(n_trials = 100)
+hist(risk_vals)
+mean(risk_vals)
+```
+
+```{r}
+# Remove extreme outliers
+threshold <- quantile(risk_vals, 0.99)  # 99th percentile cutoff
+filtered_risk_vals <- risk_vals[risk_vals <= threshold]
+
+# Plot histogram
+hist(filtered_risk_vals, 
+     breaks = 60,    # Smaller bins
+     col = "red",    # Red bars
+     border = "white",
+     probability = TRUE,
+     main = "Distribution of Risk",
+     xlab = "Risk (MSE)")
+
+# Add density curve
+lines(density(filtered_risk_vals), col = "darkblue", lwd = 2)
+
+# Add mean line
+abline(v = mean(filtered_risk_vals), col = "black", lty = 2, lwd = 2)
+
+# Add legend
+legend("topright", 
+       legend = sprintf("Mean Risk = %.2f", mean(filtered_risk_vals)),
        col = "black", lty = 2, bty = "n")
 ```
